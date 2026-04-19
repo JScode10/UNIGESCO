@@ -1,127 +1,311 @@
-const { app } = require('@azure/functions');
-
-function getClientPrincipal(request) {
-  // Dans Azure, ce header est ajouté par App Service Authentication (EasyAuth)
-  const header =
-    request.headers.get('x-ms-client-principal') ||
-    request.headers.get('X-MS-CLIENT-PRINCIPAL');
-
-  if (!header) return null;
-
-  try {
-    const decoded = Buffer.from(header, 'base64').toString('utf8');
-    return JSON.parse(decoded);
-  } catch {
-    return null;
-  }
-}
-
-function getGroups(principal) {
-  const claims = principal?.claims || [];
-  return claims
-    .filter(c => (c.typ || '').toLowerCase() === 'groups')
-    .map(c => c.val);
-}
-
-app.http('analyze', {
-  methods: ['POST'],
-  authLevel: 'anonymous', // OK: l'accès réel est contrôlé par EasyAuth + groupe
-  handler: async (request, context) => {
-    try {
-      const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
-      const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-
-      // 1) AuthN (EasyAuth)
-      const principal = getClientPrincipal(request);
-      if (!principal) {
-        return { status: 401, body: 'Non authentifié' };
-      }
-
-      // 2) AuthZ (groupe)
-      if (!ALLOWED_GROUP_ID) {
-        return { status: 500, body: 'ALLOWED_GROUP_ID manquant (variable d’environnement)' };
-      }
-      const groups = getGroups(principal);
-      if (!groups.includes(ALLOWED_GROUP_ID)) {
-        return { status: 403, body: 'Accès refusé (groupe)' };
-      }
-
-      // 3) Input JSON
-      let body;
-      try {
-        body = await request.json();
-      } catch {
-        return { status: 400, body: 'Body JSON invalide' };
-      }
-
-      const { data, mime } = body || {};
-      if (!data) return { status: 400, body: "Champ 'data' (base64) manquant" };
-      if (!ANTHROPIC_API_KEY) return { status: 500, body: 'ANTHROPIC_API_KEY manquante' };
-
-      // 4) Appel Anthropic
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-5',
-          max_tokens: 1000,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'document',
-                  source: {
-                    type: 'base64',
-                    media_type: mime || 'application/pdf',
-                    data
-                  }
-                },
-                {
-                  type: 'text',
-                  text: `Analyse ce document et retourne UNIQUEMENT un JSON valide :
-{"document_type":"INV|STAT|XXX","supplier_name":"...","invoice_number":"...","invoice_date":"YYYY-MM-DD"}
-
-Règles :
-- document_type : "STAT" si état de compte / "INV" si facture ou reçu / "XXX" sinon
-- supplier_name : nom complet du fournisseur tel qu'écrit
-- invoice_number : numéro unique du document
-- invoice_date : YYYY-MM-DD`
-                }
-              ]
-            }
-          ]
-        })
-      });
-
-      const payload = await resp.json();
-
-      if (!resp.ok) {
-        const msg = payload?.error?.message || `Erreur Anthropic (${resp.status})`;
-        return { status: 502, body: msg };
-      }
-
-      // 5) Convertir la réponse en JSON
-      const text = (payload.content || []).map(x => x.text || '').join('').trim();
-      let result;
-      try {
-        result = JSON.parse(text);
-      } catch {
-        return { status: 502, body: `Réponse IA non-JSON: ${text.slice(0, 200)}` };
-      }
-
-      return {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(result)
-      };
-    } catch (e) {
-      return { status: 500, body: e?.message || 'Erreur serveur' };
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Renommeur de Factures</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0f1e; min-height: 100vh; }
+    #app {
+      min-height: 100vh; background: #0a0f1e; color: #e2e8f0;
+      font-family: 'IBM Plex Sans', sans-serif;
+      padding: 32px 24px; display: flex; flex-direction: column; gap: 28px;
+      max-width: 800px; margin: 0 auto;
     }
+    .header { display: flex; flex-direction: column; gap: 4px; }
+    .header h1 { font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: #f8fafc; letter-spacing: -0.5px; }
+    .header span { font-size: 13px; color: #64748b; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
+    .format-badge {
+      display: inline-flex; align-items: center;
+      background: #1e293b; border: 1px solid #334155; border-radius: 6px;
+      padding: 8px 14px; font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+      color: #f59e0b; width: fit-content;
+    }
+    .drop-zone {
+      border: 2px dashed #334155; border-radius: 12px; padding: 48px 24px;
+      text-align: center; cursor: pointer; transition: all 0.2s; background: #0f172a;
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      position: relative;
+    }
+    .drop-zone:hover, .drop-zone.active { border-color: #f59e0b; background: #1a1f2e; }
+    .drop-zone .icon { width: 48px; height: 48px; background: #1e293b; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .drop-zone h2 { font-size: 16px; font-weight: 600; color: #cbd5e1; }
+    .drop-zone p { font-size: 13px; color: #475569; }
+    .file-list { display: flex; flex-direction: column; gap: 8px; }
+    .file-row {
+      background: #0f172a; border: 1px solid #1e293b; border-radius: 10px;
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.2s;
+    }
+    .file-row.done { border-color: #166534; }
+    .file-row.error { border-color: #7f1d1d; }
+    .file-row.processing { border-color: #92400e; }
+    .file-row-top { display: flex; align-items: center; gap: 10px; }
+    .file-icon { font-size: 18px; flex-shrink: 0; }
+    .file-names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .original-name { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: line-through; }
+    .new-name { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #22c55e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pending-label { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #475569; }
+    .status-chip { font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.5px; flex-shrink: 0; }
+    .file-actions { display: flex; align-items: center; gap: 8px; }
+    .btn-download { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #14532d; border: 1px solid #166534; border-radius: 6px; color: #86efac; font-family: 'IBM Plex Mono', monospace; font-size: 12px; cursor: pointer; text-decoration: none; transition: background 0.15s; }
+    .btn-download:hover { background: #166534; }
+    .btn-remove { background: none; border: none; color: #475569; cursor: pointer; font-size: 16px; padding: 4px; line-height: 1; transition: color 0.15s; }
+    .btn-remove:hover { color: #ef4444; }
+    .error-msg { font-size: 12px; color: #f87171; font-family: 'IBM Plex Mono', monospace; padding: 6px 10px; background: #1f0a0a; border-radius: 6px; }
+    .processing-bar { height: 2px; background: #1e293b; border-radius: 2px; overflow: hidden; }
+    .processing-bar-inner { height: 100%; background: #f59e0b; animation: scan 1.2s ease-in-out infinite; width: 40%; }
+    @keyframes scan { 0% { transform: translateX(-150%); } 100% { transform: translateX(350%); } }
+    #fileSection { display: none; flex-direction: column; gap: 28px; }
+    .actions-bar { display: flex; gap: 12px; align-items: center; }
+    .btn-process { flex: 1; padding: 13px 20px; background: #f59e0b; border: none; border-radius: 8px; color: #0a0f1e; font-family: 'IBM Plex Sans', sans-serif; font-weight: 600; font-size: 15px; cursor: pointer; transition: background 0.15s; }
+    .btn-process:hover { background: #fbbf24; }
+    .btn-process:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+    .btn-download-all { flex: 1; padding: 13px 20px; background: #14532d; border: 1px solid #166534; border-radius: 8px; color: #86efac; font-family: 'IBM Plex Sans', sans-serif; font-weight: 600; font-size: 15px; cursor: pointer; transition: background 0.15s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .btn-download-all:hover:not(:disabled) { background: #166534; }
+    .btn-download-all:disabled { background: #0f2318; border-color: #1a3a25; color: #2d6a41; cursor: not-allowed; }
+    .btn-clear { padding: 13px 20px; background: none; border: 1px solid #334155; border-radius: 8px; color: #64748b; font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; cursor: pointer; transition: all 0.15s; }
+    .btn-clear:hover { border-color: #ef4444; color: #ef4444; }
+
+
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <div class="header">
+    <h1>📄 RENOMMEUR DE FACTURES</h1>
+    <span>Traitement automatique par intelligence artificielle</span>
+    <span style="font-size:11px; color:#334155; font-family:'IBM Plex Mono',monospace; letter-spacing:0.5px;">v1.6</span>
+  </div>
+
+  <div class="format-badge">FORMAT → INV/STAT/XXX-NOM-NUMÉRO-DATE(YYYYMMDD)</div>
+
+  <!-- Zone de dépôt -->
+  <div class="drop-zone" id="dropZone">
+    <div class="icon">📂</div>
+    <h2>Déposer des factures PDF ici</h2>
+    <p>ou cliquer pour sélectionner des fichiers</p>
+    <input id="fileInput" type="file" accept=".pdf" multiple
+      style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:0;" />
+  </div>
+
+  <!-- Liste & actions -->
+  <div id="fileSection">
+    <div class="file-list" id="fileList"></div>
+    <div class="actions-bar">
+      <button class="btn-process" id="btnProcess" disabled>✦ Renommer 0 fichier(s)</button>
+      <button class="btn-download-all" id="btnDownloadAll" disabled>↓ Tout télécharger (.zip)</button>
+      <button class="btn-clear" id="btnClear">Tout effacer</button>
+    </div>
+  </div>
+
+</div>
+<script>
+// ── ZIP ───────────────────────────────────────────────────────────────────────
+function crc32(buf) {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) { let c = i; for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c; }
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = t[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function u16(n) { return new Uint8Array([n & 0xff, (n >> 8) & 0xff]); }
+function u32(n) { return new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]); }
+function cat(a) { const t = a.reduce((s, x) => s + x.length, 0), o = new Uint8Array(t); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; }
+function buildZip(entries) {
+  const enc = new TextEncoder(), L = [], C = []; let off = 0;
+  for (const { name, data } of entries) {
+    const nb = enc.encode(name), crc = crc32(data), sz = data.length;
+    const loc = cat([new Uint8Array([0x50,0x4b,0x03,0x04]), u16(20),u16(0),u16(0),u16(0),u16(0), u32(crc),u32(sz),u32(sz), u16(nb.length),u16(0), nb, data]);
+    const cen = cat([new Uint8Array([0x50,0x4b,0x01,0x02]), u16(20),u16(20),u16(0),u16(0),u16(0),u16(0), u32(crc),u32(sz),u32(sz), u16(nb.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(off), nb]);
+    L.push(loc); C.push(cen); off += loc.length;
+  }
+  const cd = cat(C), n = entries.length;
+  return cat([...L, cd, cat([new Uint8Array([0x50,0x4b,0x05,0x06]), u16(0),u16(0),u16(n),u16(n), u32(cd.length),u32(off),u16(0)])]);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function toMilitaryDate(s) {
+  const c = s.replace(/[^0-9\/\-\.]/g, "");
+  if (/^\d{4}[-\/]\d{2}[-\/]\d{2}$/.test(c)) return c.replace(/[-\/]/g, "");
+  if (/^\d{2}[-\/]\d{2}[-\/]\d{4}$/.test(c)) { const [d, m, y] = c.split(/[-\/]/); return `${y}${m}${d}`; }
+  const d = new Date(s); if (isNaN(d)) return s.replace(/[^0-9]/g, "");
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`;
+}
+function sanitize(v) {
+  return v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/-/g, "_").replace(/\./g, "");
+}
+function buildFilename(info) {
+  const p = info.document_type === "STAT" ? "STAT" : info.document_type === "XXX" ? "XXX" : "INV";
+  return `${p}-${sanitize(info.supplier_name || "INCONNU")}-${sanitize(info.invoice_number || "XXXXX")}-${toMilitaryDate(info.invoice_date || "")}.pdf`;
+}
+async function analyzeInvoice(file) {
+  // Conversion du fichier en base64
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + chunkSize)
+    );
+  }
+  const b64 = btoa(binary);
+
+  // Appel de l'Azure Function (sécurisée par Azure AD + groupe)
+  const response = await fetch("/api/analyze", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    credentials: "include", // IMPORTANT pour transmettre l'auth Azure AD
+    body: JSON.stringify({
+      filename: file.name,
+      mime: file.type || "application/pdf",
+      data: b64
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return await response.json();
+}
+
+// ── State & render ────────────────────────────────────────────────────────────
+let files = [];
+const STATUS_COLOR = { pending: "#64748b", processing: "#f59e0b", done: "#22c55e", error: "#ef4444" };
+const STATUS_LABEL = { pending: "EN ATTENTE", processing: "ANALYSE...", done: "RENOMMÉ", error: "ERREUR" };
+
+function renderButtons() {
+  const pending = files.filter(f => f.status === "pending");
+  const processing = files.filter(f => f.status === "processing");
+  const done = files.filter(f => f.status === "done");
+  const btnProcess = document.getElementById("btnProcess");
+  const btnAll = document.getElementById("btnDownloadAll");
+  btnProcess.disabled = !pending.length || processing.length > 0;
+  btnProcess.textContent = processing.length ? "⏳ Traitement en cours..." : `✦ Renommer ${pending.length} fichier(s)`;
+  btnAll.disabled = !done.length || pending.length > 0 || processing.length > 0;
+}
+
+function render() {
+  const list = document.getElementById("fileList");
+  const section = document.getElementById("fileSection");
+  section.style.display = files.length ? "flex" : "none";
+  list.innerHTML = "";
+  for (const f of files) {
+    const c = STATUS_COLOR[f.status];
+    const row = document.createElement("div");
+    row.className = `file-row ${f.status}`;
+    row.innerHTML = `
+      <div class="file-row-top">
+        <span class="file-icon">📋</span>
+        <div class="file-names">
+          <span class="original-name">${f.originalName}</span>
+          ${f.newName ? `<span class="new-name">${f.newName}</span>` : (f.status === "pending" ? `<span class="pending-label">En attente d'analyse...</span>` : "")}
+        </div>
+        <span class="status-chip" style="background:${c}22;color:${c};border:1px solid ${c}44">${STATUS_LABEL[f.status]}</span>
+        <button class="btn-remove" data-id="${f.id}">×</button>
+      </div>
+      ${f.status === "processing" ? `<div class="processing-bar"><div class="processing-bar-inner"></div></div>` : ""}
+      ${f.status === "done" && f.url ? `<div class="file-actions"><a class="btn-download" href="${f.url}" download="${f.newName}">↓ Télécharger</a></div>` : ""}
+      ${f.status === "error" ? `<div class="error-msg">⚠ ${f.error || "Erreur d'analyse"}</div>` : ""}
+    `;
+    list.appendChild(row);
+  }
+  list.querySelectorAll(".btn-remove").forEach(btn => {
+    btn.onclick = () => {
+      const f = files.find(x => x.id === btn.dataset.id);
+      if (f?.url) URL.revokeObjectURL(f.url);
+      files = files.filter(x => x.id !== btn.dataset.id);
+      render();
+    };
+  });
+  renderButtons();
+}
+
+function addFiles(newFiles) {
+  const pdfs = Array.from(newFiles).filter(f => f.type === "application/pdf" || f.name.endsWith(".pdf"));
+  if (!pdfs.length) return;
+  files = [...files, ...pdfs.map(f => ({ id: crypto.randomUUID(), file: f, originalName: f.name, newName: null, status: "pending", error: null, url: null, bytes: null }))];
+  render();
+}
+
+// ── Événements ────────────────────────────────────────────────────────────────
+// ── Événements ────────────────────────────────────────────────────────────────
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+
+// Empêche Edge / SharePoint d'ouvrir les fichiers glissés ailleurs
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+// Feedback visuel drag
+["dragenter", "dragover"].forEach(evt => {
+  dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.add("active"); });
+  fileInput.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.add("active"); });
+});
+["dragleave", "dragend"].forEach(evt => {
+  dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.remove("active"); });
+  fileInput.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.remove("active"); });
+});
+
+// Drop sur la zone OU sur l'input overlay
+[dropZone, fileInput].forEach(el => {
+  el.addEventListener("drop", e => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove("active");
+    if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  });
+});
+
+// Sélection via explorateur — addEventListener plus fiable que onchange dans les iframes
+fileInput.addEventListener("change", e => {
+  if (e.target.files && e.target.files.length) {
+    addFiles(e.target.files);
+    // Reset pour permettre de re-sélectionner le même fichier
+    fileInput.value = "";
   }
 });
-``
+
+document.getElementById("btnProcess").onclick = async () => {
+  const pending = files.filter(f => f.status === "pending");
+  for (const entry of pending) {
+    files = files.map(f => f.id === entry.id ? { ...f, status: "processing" } : f); render();
+    try {
+      const info = await analyzeInvoice(entry.file);
+      const newName = buildFilename(info);
+      const bytes = new Uint8Array(await entry.file.arrayBuffer());
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      files = files.map(f => f.id === entry.id ? { ...f, status: "done", newName, url, bytes } : f);
+    } catch (e) {
+      files = files.map(f => f.id === entry.id ? { ...f, status: "error", error: e.message } : f);
+    }
+    render();
+  }
+};
+
+document.getElementById("btnDownloadAll").onclick = () => {
+  const done = files.filter(f => f.status === "done" && f.bytes && f.newName);
+  if (!done.length) return;
+  const zipBytes = buildZip(done.map(f => ({ name: f.newName, data: f.bytes })));
+  const url = URL.createObjectURL(new Blob([zipBytes], { type: "application/zip" }));
+  const a = document.createElement("a"); a.href = url; a.download = "factures_renommees.zip";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+};
+
+document.getElementById("btnClear").onclick = () => {
+  files.forEach(f => f.url && URL.revokeObjectURL(f.url));
+  files = []; render();
+};
+
+// Init
+render();
+</script>
+</body>
+</html>
