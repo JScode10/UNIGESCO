@@ -2,8 +2,11 @@
   "name": "renommeur-api",
   "version": "1.0.0",
   "private": true,
+  "main": "src/functions/*.js",
   "dependencies": {
-    "@azure/functions": "^4.0.0",
-    "node-fetch": "^3.3.2"
+    "@azure/functions": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
