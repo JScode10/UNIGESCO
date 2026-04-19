@@ -1,0 +1,9 @@
+{
+  "name": "renommeur-api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@azure/functions": "^4.0.0",
+    "node-fetch": "^3.3.2"
+  }
+}
