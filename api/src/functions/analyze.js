@@ -4,9 +4,7 @@ function getClientPrincipal(request) {
   const header =
     request.headers.get('x-ms-client-principal') ||
     request.headers.get('X-MS-CLIENT-PRINCIPAL');
-
   if (!header) return null;
-
   try {
     const decoded = Buffer.from(header, 'base64').toString('utf8');
     return JSON.parse(decoded);
@@ -30,22 +28,21 @@ app.http('analyze', {
       const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
       const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-      // ============================================
-      // TEMPORAIRE : auth + groupe désactivés pour test
-      // ============================================
-      // const principal = getClientPrincipal(request);
-      // if (!principal) {
-      //   return { status: 401, body: 'Non authentifié' };
-      // }
-      // if (!ALLOWED_GROUP_ID) {
-      //   return { status: 500, body: "ALLOWED_GROUP_ID manquant" };
-      // }
-      // const groups = getGroups(principal);
-      // if (!groups.includes(ALLOWED_GROUP_ID)) {
-      //   return { status: 403, body: 'Accès refusé (groupe)' };
-      // }
-      // ============================================
+      // 1) AuthN (EasyAuth)
+      const principal = getClientPrincipal(request);
+      if (!principal) {
+        return { status: 401, body: 'Non authentifié' };
+      }
 
+      // 2) AuthZ (groupe)
+      if (ALLOWED_GROUP_ID) {
+        const groups = getGroups(principal);
+        if (!groups.includes(ALLOWED_GROUP_ID)) {
+          return { status: 403, body: 'Accès refusé (groupe)' };
+        }
+      }
+
+      // 3) Input JSON
       let body;
       try {
         body = await request.json();
@@ -57,6 +54,7 @@ app.http('analyze', {
       if (!data) return { status: 400, body: "Champ 'data' (base64) manquant" };
       if (!ANTHROPIC_API_KEY) return { status: 500, body: 'ANTHROPIC_API_KEY manquante' };
 
+      // 4) Appel Anthropic
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -97,14 +95,13 @@ Règles :
       });
 
       const payload = await resp.json();
-
       if (!resp.ok) {
         const msg = payload?.error?.message || `Erreur Anthropic (${resp.status})`;
         return { status: 502, body: msg };
       }
 
+      // 5) Nettoyer et parser la réponse
       let text = (payload.content || []).map(x => x.text || '').join('').trim();
-      // Nettoyer les backticks markdown que Claude ajoute parfois
       text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
       let result;
       try {
