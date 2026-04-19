@@ -103,7 +103,9 @@ Règles :
         return { status: 502, body: msg };
       }
 
-      const text = (payload.content || []).map(x => x.text || '').join('').trim();
+      let text = (payload.content || []).map(x => x.text || '').join('').trim();
+      // Nettoyer les backticks markdown que Claude ajoute parfois
+      text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
       let result;
       try {
         result = JSON.parse(text);
