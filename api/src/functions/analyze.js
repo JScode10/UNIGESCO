@@ -13,36 +13,23 @@ function getClientPrincipal(request) {
   }
 }
 
-function getGroups(principal) {
-  const claims = principal?.claims || [];
-  return claims
-    .filter(c => (c.typ || '').toLowerCase() === 'groups')
-    .map(c => c.val);
-}
-
 app.http('analyze', {
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: async (request, context) => {
     try {
-      const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
       const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-      // 1) AuthN (EasyAuth)
+      // 1) AuthN — vérifier que l'utilisateur est connecté
       const principal = getClientPrincipal(request);
       if (!principal) {
         return { status: 401, body: 'Non authentifié' };
       }
 
-      // 2) AuthZ (groupe)
-      if (ALLOWED_GROUP_ID) {
-        const groups = getGroups(principal);
-        if (!groups.includes(ALLOWED_GROUP_ID)) {
-          return { status: 403, body: 'Accès refusé (groupe)' };
-        }
-      }
+      // Log pour diagnostic (optionnel, à retirer plus tard)
+      context.log(`Utilisateur: ${principal.userDetails}`);
 
-      // 3) Input JSON
+      // 2) Input JSON
       let body;
       try {
         body = await request.json();
@@ -54,7 +41,7 @@ app.http('analyze', {
       if (!data) return { status: 400, body: "Champ 'data' (base64) manquant" };
       if (!ANTHROPIC_API_KEY) return { status: 500, body: 'ANTHROPIC_API_KEY manquante' };
 
-      // 4) Appel Anthropic
+      // 3) Appel Anthropic
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -100,7 +87,7 @@ Règles :
         return { status: 502, body: msg };
       }
 
-      // 5) Nettoyer et parser la réponse
+      // 4) Nettoyer et parser la réponse
       let text = (payload.content || []).map(x => x.text || '').join('').trim();
       text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
       let result;
