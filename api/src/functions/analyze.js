@@ -32,19 +32,19 @@ app.http('analyze', {
       const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
       // 1) AuthN (EasyAuth)
-      const principal = getClientPrincipal(request);
-      if (!principal) {
-        return { status: 401, body: 'Non authentifié' };
-      }
+      //**const principal = getClientPrincipal(request);
+      //**if (!principal) {
+        //**return { status: 401, body: 'Non authentifié' };
+      //**}
 
       // 2) AuthZ (groupe)
       if (!ALLOWED_GROUP_ID) {
         return { status: 500, body: 'ALLOWED_GROUP_ID manquant (variable d’environnement)' };
       }
-      const groups = getGroups(principal);
-      if (!groups.includes(ALLOWED_GROUP_ID)) {
-        return { status: 403, body: 'Accès refusé (groupe)' };
-      }
+      //**const groups = getGroups(principal);
+      //**if (!groups.includes(ALLOWED_GROUP_ID)) {
+        //**return { status: 403, body: 'Accès refusé (groupe)' };
+      //**}
 
       // 3) Input JSON
       let body;
