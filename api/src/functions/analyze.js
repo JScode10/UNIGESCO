@@ -1,7 +1,6 @@
 const { app } = require('@azure/functions');
 
 function getClientPrincipal(request) {
-  // Dans Azure, ce header est ajouté par App Service Authentication (EasyAuth)
   const header =
     request.headers.get('x-ms-client-principal') ||
     request.headers.get('X-MS-CLIENT-PRINCIPAL');
@@ -25,28 +24,28 @@ function getGroups(principal) {
 
 app.http('analyze', {
   methods: ['POST'],
-  authLevel: 'anonymous', // OK: l'accès réel est contrôlé par EasyAuth + groupe
+  authLevel: 'anonymous',
   handler: async (request, context) => {
     try {
       const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
       const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-      // 1) AuthN (EasyAuth)
-      const principal = getClientPrincipal(request);
-      if (!principal) {
-        return { status: 401, body: 'Non authentifié' };
-      }
+      // ============================================
+      // TEMPORAIRE : auth + groupe désactivés pour test
+      // ============================================
+      // const principal = getClientPrincipal(request);
+      // if (!principal) {
+      //   return { status: 401, body: 'Non authentifié' };
+      // }
+      // if (!ALLOWED_GROUP_ID) {
+      //   return { status: 500, body: "ALLOWED_GROUP_ID manquant" };
+      // }
+      // const groups = getGroups(principal);
+      // if (!groups.includes(ALLOWED_GROUP_ID)) {
+      //   return { status: 403, body: 'Accès refusé (groupe)' };
+      // }
+      // ============================================
 
-      // 2) AuthZ (groupe)
-      if (!ALLOWED_GROUP_ID) {
-        return { status: 500, body: 'ALLOWED_GROUP_ID manquant (variable d’environnement)' };
-      }
-      const groups = getGroups(principal);
-      if (!groups.includes(ALLOWED_GROUP_ID)) {
-        return { status: 403, body: 'Accès refusé (groupe)' };
-      }
-
-      // 3) Input JSON
       let body;
       try {
         body = await request.json();
@@ -58,7 +57,6 @@ app.http('analyze', {
       if (!data) return { status: 400, body: "Champ 'data' (base64) manquant" };
       if (!ANTHROPIC_API_KEY) return { status: 500, body: 'ANTHROPIC_API_KEY manquante' };
 
-      // 4) Appel Anthropic
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -105,7 +103,6 @@ Règles :
         return { status: 502, body: msg };
       }
 
-      // 5) Convertir la réponse en JSON
       const text = (payload.content || []).map(x => x.text || '').join('').trim();
       let result;
       try {
@@ -124,4 +121,3 @@ Règles :
     }
   }
 });
-``
