@@ -33,17 +33,18 @@ app.http('analyze', {
 
       // 1) AuthN (EasyAuth)
       const principal = getClientPrincipal(request);
-      if (!principal) {
-        return { status: 401, body: 'Non authentifié' };
+      //**** TEMPORAIRE (test): on ne bloque pas si non authentifié
+      //****if (!principal) {
+        //****return { status: 401, body: 'Non authentifié' };
       }
 
       // 2) AuthZ (groupe)
       if (!ALLOWED_GROUP_ID) {
         return { status: 500, body: 'ALLOWED_GROUP_ID manquant (variable d’environnement)' };
       }
-      const groups = getGroups(principal);
-      if (!groups.includes(ALLOWED_GROUP_ID)) {
-        return { status: 403, body: 'Accès refusé (groupe)' };
+      //****const groups = getGroups(principal);
+      //****if (!groups.includes(ALLOWED_GROUP_ID)) {
+        //****return { status: 403, body: 'Accès refusé (groupe)' };
       }
 
       // 3) Input JSON
